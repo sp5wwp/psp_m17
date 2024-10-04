@@ -112,7 +112,7 @@ void start_client(const char *addr, uint16_t port)
     }
 	else
 	{
-		printf("Connected to reflector\n");
+		printf("Connected to reflector at %s, port %d\n", addr, port);
 	}
 
 	uint8_t msg[11]="CONN      C";
@@ -221,7 +221,7 @@ int connect_to_apctl(int config)
 		sceKernelDelayThread(50 * 1000); // 50ms
 	}
 
-	printf(MODULE_NAME ": Connected!\n");
+	printf(" connected!\n");
 
 	if(err!=0)
 	{
