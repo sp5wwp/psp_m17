@@ -87,8 +87,8 @@ int make_socket(uint16_t port)
 	return sock;
 }
 
-/* Connect to a server and wait */
-void start_client(void)
+/* Connect to a reflector and wait */
+void start_client(const char *addr, uint16_t port)
 {
 	int sock;
 	struct sockaddr_in servername;
@@ -101,12 +101,9 @@ void start_client(void)
 		return;
     }
 
-	//uint8_t addr[4]={192, 168, 242, 16}; //pc
-	uint8_t addr[4]={152, 70, 192, 70}; //refl
-
 	servername.sin_family = AF_INET;
 	servername.sin_addr.s_addr = inet_addr("152.70.192.70");
-	servername.sin_port = htons(17000);
+	servername.sin_port = htons(port);
 
 	if(0>connect(sock, (struct sockaddr*)&servername, sizeof(servername)))
     {
@@ -131,13 +128,27 @@ void start_client(void)
 
 		if(rd>0)
 		{
-			printf("Read: %s\n", buff);
+			//printf("Read: %s\n", buff);
 
-			if(strcmp(buff, "PING")==0)
+			if(strcmp(buff, "PING")==0) //PING packet from the server
 			{
 				msg[0]='P'; msg[1]='O'; msg[2]='N'; msg[3]='G';
 				int wb = write(sock, msg, 10);
-				printf("-> PONG\n", wb);
+				//printf("-> PONG\n", wb);
+			}
+			else if(strncmp(buff, "M17 ", 4)==0) //payload
+			{
+				uint8_t *lich=&buff[6]; 
+				uint8_t *pld=&buff[36];
+
+				uint16_t fn=(buff[34]<<8)+buff[35];
+				uint16_t sid=(buff[4]<<8)+buff[5];
+
+				printf("FN:%04X SID:%04X", fn, sid);
+				printf(" DST:"); for(uint8_t i=0; i<6; i++) printf("%02X", lich[i]);
+				printf(" SRC:"); for(uint8_t i=0; i<6; i++) printf("%02X", lich[6+i]);
+				//printf(" PLD:"); for(uint8_t i=0; i<16; i++) printf("%02X", pld[i]);
+				printf("\n");
 			}
 		}
 		
@@ -153,6 +164,7 @@ int connect_to_apctl(int config)
 
 	/* Connect using the first profile */
 	err = sceNetApctlConnect(config);
+
 	if(err != 0)
 	{
 		printf(MODULE_NAME ": sceNetApctlConnect returns %08X\n", err);
@@ -160,30 +172,58 @@ int connect_to_apctl(int config)
 	}
 
 	printf(MODULE_NAME ": Connecting...\n");
+
 	while(1)
 	{
 		int state;
 		err = sceNetApctlGetState(&state);
 
-		if(err != 0)
+		if(err!=0)
 		{
 			printf(MODULE_NAME ": sceNetApctlGetState returns $%x\n", err);
 			break;
 		}
-		if(state > stateLast)
+		if(state>stateLast)
 		{
-			printf("  connection state %d of 4\n", state);
+			switch(state)
+			{
+				case PSP_NET_APCTL_STATE_DISCONNECTED:
+					; //printf("*disconnected\n");
+				break;
+
+				case PSP_NET_APCTL_STATE_SCANNING:
+					printf(" scanning\n");
+				break;
+
+				case PSP_NET_APCTL_STATE_JOINING:
+					printf(" joining\n");
+				break;
+
+				case PSP_NET_APCTL_STATE_GETTING_IP:
+					printf(" getting IP\n");
+				break;
+
+				case PSP_NET_APCTL_STATE_GOT_IP:
+					printf(" got IP\n");
+				break;
+
+				default:
+					;
+				break;
+			}
+
 			stateLast = state;
 		}
-		if(state == 4)
+		if(state==4)
 			break; // connected with static IP
 
 		// wait a little before polling again
 		sceKernelDelayThread(50 * 1000); // 50ms
 	}
+
 	printf(MODULE_NAME ": Connected!\n");
 
-	if(err != 0)
+	if(err!=0)
 	{
 		return 0;
 	}
@@ -210,7 +250,7 @@ int net_thread(SceSize args, void *argp)
 			if (sceNetApctlGetInfo(8, &info) != 0)
 				strcpy(info.ip, "unknown IP");
 
-			start_client();
+			start_client("152.70.192.70", 17000);
 		}
 	}while(0);
 }
