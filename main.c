@@ -21,7 +21,7 @@
 //libm17
 #include <m17.h>
 //Codec 2
-//#include <codec2.h>
+#include <codec2.h>
 
 #define printf			pspDebugScreenPrintf
 #define MODULE_NAME		"psp_m17"
@@ -121,8 +121,8 @@ void start_client(const char *addr, uint16_t port)
 		printf("Connected to reflector at %s, port %d\n", addr, port);
 	}
 
-	uint8_t msg[11]="CONN      C";
-	msg[4]=0x01; msg[5]=0x31; msg[6]=0x92; msg[7]=0x41; msg[8]=0xB0; msg[9]=0x93;
+	uint8_t msg[11]="CONNxxxxxxC"; //"xxxxxx" is a placeholder
+	encode_callsign_bytes(&msg[4], "N0CALL");
 
 	write(sock, msg, 11);
 
