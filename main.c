@@ -18,6 +18,10 @@
 //Internet stuff
 #include <arpa/inet.h>
 #include <errno.h>
+//libm17
+#include <m17.h>
+//Codec 2
+//#include <codec2.h>
 
 #define printf			pspDebugScreenPrintf
 #define MODULE_NAME		"psp_m17"
@@ -28,6 +32,8 @@ PSP_HEAP_THRESHOLD_SIZE_KB(1024);
 PSP_HEAP_SIZE_KB(-2048);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
+
+//struct CODEC2 *c2;
 
 /* Exit callback */
 int exit_callback(int arg1, int arg2, void *common)
@@ -144,15 +150,20 @@ void start_client(const char *addr, uint16_t port)
 				uint16_t fn=(buff[34]<<8)+buff[35];
 				uint16_t sid=(buff[4]<<8)+buff[5];
 
-				printf("FN:%04X SID:%04X", fn, sid);
-				printf(" DST:"); for(uint8_t i=0; i<6; i++) printf("%02X", lich[i]);
-				printf(" SRC:"); for(uint8_t i=0; i<6; i++) printf("%02X", lich[6+i]);
-				//printf(" PLD:"); for(uint8_t i=0; i<16; i++) printf("%02X", pld[i]);
+				uint8_t d_dst[10], d_src[10];
+				decode_callsign_bytes(d_dst, &lich[0]);
+				decode_callsign_bytes(d_src, &lich[6]);
+
+				printf("%04X %04X %10s -> %-10s ", sid, fn, d_src, d_dst);
+				for(uint8_t i=0; i<16; i++) printf("%02X", pld[i]);
 				printf("\n");
+
+				if(fn==0)
+				{
+					//c2 = codec2_create(CODEC2_MODE_3200);
+				}
 			}
 		}
-		
-		//sceKernelDelayThread(1000 * 1000); // 1s
 	}
 }
 
@@ -196,15 +207,15 @@ int connect_to_apctl(int config)
 				break;
 
 				case PSP_NET_APCTL_STATE_JOINING:
-					printf(" joining\n");
+					printf(" joining AP\n");
 				break;
 
 				case PSP_NET_APCTL_STATE_GETTING_IP:
-					printf(" getting IP\n");
+					printf(" getting IP address\n");
 				break;
 
 				case PSP_NET_APCTL_STATE_GOT_IP:
-					printf(" got IP\n");
+					printf(" got IP address\n");
 				break;
 
 				default:
