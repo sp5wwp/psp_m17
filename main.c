@@ -122,7 +122,7 @@ void start_client(const char *addr, uint16_t port)
 	}
 
 	uint8_t msg[11]="CONNxxxxxxC"; //"xxxxxx" is a placeholder
-	encode_callsign_bytes(&msg[4], "N0CALL");
+	encode_callsign_bytes(&msg[4], "N0CALL H");
 
 	write(sock, msg, 11);
 
