@@ -33,7 +33,7 @@ PSP_HEAP_SIZE_KB(-2048);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 
-//struct CODEC2 *c2;
+struct CODEC2 *c2;
 
 /* Exit callback */
 int exit_callback(int arg1, int arg2, void *common)
@@ -160,7 +160,15 @@ void start_client(const char *addr, uint16_t port)
 
 				if(fn==0)
 				{
-					//c2 = codec2_create(CODEC2_MODE_3200);
+					c2 = codec2_create(CODEC2_MODE_3200);
+				}
+
+				//decode audio here
+				;
+
+				if(fn&0x80)
+				{
+					codec2_destroy(c2);
 				}
 			}
 		}
