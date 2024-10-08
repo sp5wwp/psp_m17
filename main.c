@@ -10,6 +10,8 @@
 //standard libs
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdarg.h>
 //PSP stuff
 #include <pspkernel.h>
 #include <pspnet_apctl.h>
@@ -34,6 +36,41 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 
 struct CODEC2 *c2;
+
+//default data: M17-M17 C
+uint8_t ref_addr[16]="152.70.192.70";
+uint16_t ref_port=17000;
+uint8_t ref_name[8]="M17-M17";
+uint8_t ref_module='C';
+uint8_t src_call[12]="N0CALL H";
+
+//RGB to u32
+uint32_t getColor(uint8_t r, uint8_t g, uint8_t b)
+{
+	return (b<<16)|(g<<8)|r;
+}
+
+//print with color
+void printfc(const uint32_t color, const char* fmt, ...)
+{
+	char str[200];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsprintf(str, fmt, ap);
+	va_end(ap);
+
+	if(color<0x1000000U)
+	{
+		pspDebugScreenSetTextColor(color);
+		printf(str);
+		pspDebugScreenSetTextColor(getColor(255, 255, 255));
+	}
+	else
+	{
+		printf(str);
+	}
+}
 
 /* Exit callback */
 int exit_callback(int arg1, int arg2, void *common)
@@ -98,17 +135,18 @@ void start_client(const char *addr, uint16_t port)
 {
 	int sock;
 	struct sockaddr_in servername;
-	
+
+	//let's go!
 	sock = socket(PF_INET, SOCK_DGRAM, 0);
 
 	if(sock<0)
     {
-		printf("Error creating socket\n");
+		printfc(getColor(255, 0, 0), "Error creating socket\n");
 		return;
     }
 
 	servername.sin_family = AF_INET;
-	servername.sin_addr.s_addr = inet_addr("152.70.192.70");
+	servername.sin_addr.s_addr = inet_addr(ref_addr);
 	servername.sin_port = htons(port);
 
 	if(0>connect(sock, (struct sockaddr*)&servername, sizeof(servername)))
@@ -118,11 +156,12 @@ void start_client(const char *addr, uint16_t port)
     }
 	else
 	{
-		printf("Connected to reflector at %s, port %d\n", addr, port);
+		printfc(getColor(0, 200, 0), "\nConnected to reflector at %s, port %d\n", addr, port);
 	}
 
-	uint8_t msg[11]="CONNxxxxxxC"; //"xxxxxx" is a placeholder
-	encode_callsign_bytes(&msg[4], "N0CALL H");
+	uint8_t msg[11]="CONNxxxxxxx"; //"xxxxxxx" is a placeholder
+	encode_callsign_bytes(&msg[4], src_call);
+	msg[10]=ref_module;
 
 	write(sock, msg, 11);
 
@@ -154,9 +193,13 @@ void start_client(const char *addr, uint16_t port)
 				decode_callsign_bytes(d_dst, &lich[0]);
 				decode_callsign_bytes(d_src, &lich[6]);
 
-				printf("%04X %04X %10s -> %-10s ", sid, fn, d_src, d_dst);
-				for(uint8_t i=0; i<16; i++) printf("%02X", pld[i]);
-				printf("\n");
+				pspDebugScreenSetXY(0, 10);
+				printfc(getColor(200, 200, 0), "Most recent activity:\n");
+				printfc(getColor(200, 200, 0), "SID: "); printf("%04X\n", sid);
+				printfc(getColor(200, 200, 0), "FN:  "); printf("%04X\n", fn);
+				printfc(getColor(200, 200, 0), "SRC: "); printf("%-10s\n", d_src);
+				printfc(getColor(200, 200, 0), "DST: "); printf("%-10s\n", d_dst);
+				printfc(getColor(200, 200, 0), "PLD: "); for(uint8_t i=0; i<16; i++) printf("%02X", pld[i]); //printf("\n");
 
 				if(fn==0)
 				{
@@ -190,7 +233,7 @@ int connect_to_apctl(int config)
 		return 0;
 	}
 
-	printf(MODULE_NAME ": Connecting...\n");
+	printf("Connecting...\n");
 
 	while(1)
 	{
@@ -207,7 +250,7 @@ int connect_to_apctl(int config)
 			switch(state)
 			{
 				case PSP_NET_APCTL_STATE_DISCONNECTED:
-					; //printf("*disconnected\n");
+					; //printf(" disconnected\n");
 				break;
 
 				case PSP_NET_APCTL_STATE_SCANNING:
@@ -240,7 +283,7 @@ int connect_to_apctl(int config)
 		sceKernelDelayThread(50 * 1000); // 50ms
 	}
 
-	printf(" connected!\n");
+	printf("Connected!\n");
 
 	if(err!=0)
 	{
@@ -269,10 +312,11 @@ int net_thread(SceSize args, void *argp)
 			if (sceNetApctlGetInfo(8, &info) != 0)
 				strcpy(info.ip, "unknown IP");
 
-			start_client("152.70.192.70", 17000);
+			start_client(ref_addr, 17000);
 		}
 	}while(0);
 }
+
 /* Simple thread */
 int main(int argc, char **argv)
 {
@@ -284,6 +328,7 @@ int main(int argc, char **argv)
 	sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
 
 	pspDebugScreenInit();
+	printf("Sony PSP M"); printfc(getColor(255, 0, 0), "17"); printf(" Reflector Client by SP5WWP\n\n");
 
 	/* Create a user thread to do the real work */
 	thid = sceKernelCreateThread("net_thread", net_thread,
@@ -293,7 +338,7 @@ int main(int argc, char **argv)
 
 	if(thid<0)
 	{
-		printf("Error, could not create thread\n");
+		printfc(getColor(255, 0, 0), "Could not create thread\n");
 		sceKernelSleepThread();
 	}
 

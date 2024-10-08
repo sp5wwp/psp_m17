@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 
 project(psp_m17)
+set(title "PSP M17 Reflector Client")
+set(version "01.00")
 
 #sources list for the libm17
 FILE(GLOB libm17
@@ -49,10 +51,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 #create an EBOOT.PBP file
 create_pbp_file(
     TARGET ${PROJECT_NAME}
-    ICON_PATH NULL
-    BACKGROUND_PATH NULL
+    ICON_PATH "${PROJECT_SOURCE_DIR}/images/icon.png"
+    BACKGROUND_PATH "${PROJECT_SOURCE_DIR}/images/bkg.png"
     PREVIEW_PATH NULL
-    TITLE ${PROJECT_NAME}
-    VERSION 01.00
+    TITLE ${title}
+    VERSION ${version}
 )
 
