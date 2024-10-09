@@ -35,6 +35,9 @@ PSP_HEAP_SIZE_KB(-2048);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 
+char exec_path[64]; //absolute path to the executable
+
+//Codec2
 struct CODEC2 *c2;
 
 //default data: M17-M17 C
@@ -165,6 +168,9 @@ void start_client(const char *addr, uint16_t port)
 
 	write(sock, msg, 11);
 
+	//test audio dump file
+	SceUID audio_dump;
+
 	while(1)
 	{
 		uint8_t buff[1024]={0};
@@ -204,14 +210,32 @@ void start_client(const char *addr, uint16_t port)
 				if(fn==0)
 				{
 					c2 = codec2_create(CODEC2_MODE_3200);
+					char fname[12];
+					sprintf(fname, "/%04X.raw", sid);
+					if(strstr(exec_path, "raw")) //if we previously appended filename
+					{
+						for(uint8_t i=strlen(exec_path)-1; i--; i>0)
+						{
+							if(exec_path[i]=='/')
+							{
+								exec_path[i]=0;
+								break;
+							}
+						} 
+					}
+					audio_dump = sceIoOpen(strcat(exec_path, fname), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
 				}
 
 				//decode audio here
-				;
+				int16_t buff[2*160];
+				codec2_decode(c2, (short*)&buff[0], &pld[0]);
+				codec2_decode(c2, (short*)&buff[160], &pld[8]);
+				if(audio_dump) sceIoWrite(audio_dump, (uint8_t*)buff, sizeof(buff));
 
-				if(fn&0x80)
+				if(fn&0x8000)
 				{
 					codec2_destroy(c2);
+					if(audio_dump) sceIoClose(audio_dump);
 				}
 			}
 		}
@@ -321,6 +345,17 @@ int net_thread(SceSize args, void *argp)
 int main(int argc, char **argv)
 {
 	SceUID thid;
+
+	//retrieve the path to this executable
+	strcpy(exec_path, argv[0]); 
+	for(uint8_t i=strlen(exec_path)-1; i--; i>0)
+	{
+		if(exec_path[i]=='/')
+		{
+			exec_path[i]=0;
+			break;
+		}
+	} 
 
 	SetupCallbacks();
 
