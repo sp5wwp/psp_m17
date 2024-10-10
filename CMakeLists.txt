@@ -39,6 +39,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pspge
     pspnet_apctl
     pspnet
+    pspaudiolib
+    pspaudio
+    psppower
 )
 
 #add includes

@@ -12,11 +12,15 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <math.h>
 //PSP stuff
 #include <pspkernel.h>
 #include <pspnet_apctl.h>
 #include <pspsdk.h>
 #include <psputility.h>
+#include <pspaudiolib.h>
+#include <pspaudio.h>
+#include <psppower.h>
 //Internet stuff
 #include <arpa/inet.h>
 #include <errno.h>
@@ -32,13 +36,16 @@
 PSP_MODULE_INFO(MODULE_NAME, 0, 1, 1);
 PSP_HEAP_THRESHOLD_SIZE_KB(1024);
 PSP_HEAP_SIZE_KB(-2048);
-PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
+PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
+#define AUDIO_DBG_DUMP	//save decoded audio to files?
+//#define MAX_SPEED			//333MHz CPU?
 
 char exec_path[64]; //absolute path to the executable
 
 //Codec2
 struct CODEC2 *c2;
+int16_t audio_buff[2*160];
 
 //default data: M17-M17 C
 uint8_t ref_addr[16]="152.70.192.70";
@@ -99,8 +106,7 @@ int SetupCallbacks(void)
 {
 	int thid = 0;
 
-	thid =
-			sceKernelCreateThread("update_thread", CallbackThread, 0x11, 0xFA0, PSP_THREAD_ATTR_USER, 0);
+	thid = sceKernelCreateThread("update_thread", CallbackThread, 0x11, 0xFA0, PSP_THREAD_ATTR_USER, 0);
 	if (thid >= 0)
 	{
 		sceKernelStartThread(thid, 0, 0);
@@ -108,6 +114,12 @@ int SetupCallbacks(void)
 
 	return thid;
 }
+
+//called when the audio buffer needs refilling
+/*void audioCallback(void *buf, unsigned int length, void *userdata)
+{
+	;
+}*/
 
 int make_socket(uint16_t port)
 {
@@ -169,7 +181,9 @@ void start_client(const char *addr, uint16_t port)
 	write(sock, msg, 11);
 
 	//test audio dump file
+	#ifdef AUDIO_DBG_DUMP
 	SceUID audio_dump;
+	#endif
 
 	while(1)
 	{
@@ -199,7 +213,7 @@ void start_client(const char *addr, uint16_t port)
 				decode_callsign_bytes(d_dst, &lich[0]);
 				decode_callsign_bytes(d_src, &lich[6]);
 
-				pspDebugScreenSetXY(0, 10);
+				pspDebugScreenSetXY(0, 11);
 				printfc(getColor(200, 200, 0), "Most recent activity:\n");
 				printfc(getColor(200, 200, 0), "SID: "); printf("%04X\n", sid);
 				printfc(getColor(200, 200, 0), "FN:  "); printf("%04X\n", fn);
@@ -210,6 +224,8 @@ void start_client(const char *addr, uint16_t port)
 				if(fn==0)
 				{
 					c2 = codec2_create(CODEC2_MODE_3200);
+
+					#ifdef AUDIO_DBG_DUMP
 					char fname[12];
 					sprintf(fname, "/%04X.raw", sid);
 					if(strstr(exec_path, "raw")) //if we previously appended filename
@@ -224,18 +240,26 @@ void start_client(const char *addr, uint16_t port)
 						} 
 					}
 					audio_dump = sceIoOpen(strcat(exec_path, fname), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+					#endif
 				}
 
 				//decode audio here
-				int16_t buff[2*160];
-				codec2_decode(c2, (short*)&buff[0], &pld[0]);
-				codec2_decode(c2, (short*)&buff[160], &pld[8]);
-				if(audio_dump) sceIoWrite(audio_dump, (uint8_t*)buff, sizeof(buff));
+				codec2_decode(c2, (short*)&audio_buff[0], &pld[0]);
+				codec2_decode(c2, (short*)&audio_buff[160], &pld[8]);
+
+				#ifdef AUDIO_DBG_DUMP
+				if(audio_dump) sceIoWrite(audio_dump, (uint8_t*)audio_buff, sizeof(audio_buff));
+				#endif
 
 				if(fn&0x8000)
 				{
 					codec2_destroy(c2);
+
+					#ifdef AUDIO_DBG_DUMP
 					if(audio_dump) sceIoClose(audio_dump);
+					#endif
+
+					memset(audio_buff, 0, sizeof(audio_buff));
 				}
 			}
 		}
@@ -344,9 +368,14 @@ int net_thread(SceSize args, void *argp)
 /* Simple thread */
 int main(int argc, char **argv)
 {
+	#ifdef MAX_SPEED
+	scePowerSetClockFrequency(333, 333, 166);
+	#endif
+
 	SceUID thid;
 
 	//retrieve the path to this executable
+	#ifdef AUDIO_DBG_DUMP
 	strcpy(exec_path, argv[0]); 
 	for(uint8_t i=strlen(exec_path)-1; i--; i>0)
 	{
@@ -355,21 +384,25 @@ int main(int argc, char **argv)
 			exec_path[i]=0;
 			break;
 		}
-	} 
+	}
+	#endif
 
 	SetupCallbacks();
 
 	sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
 	sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
 
+	//pspAudioInit();
+	//pspAudioSetChannelCallback(0, audioCallback, NULL);
+
 	pspDebugScreenInit();
-	printf("Sony PSP M"); printfc(getColor(255, 0, 0), "17"); printf(" Reflector Client by SP5WWP\n\n");
+	printf("Sony PSP M"); printfc(getColor(255, 0, 0), "17"); printf(" Reflector Client by SP5WWP\nCPU at %dMHz\n\n", scePowerGetCpuClockFrequency());
 
 	/* Create a user thread to do the real work */
 	thid = sceKernelCreateThread("net_thread", net_thread,
-		0x11,			 // default priority
+		0x11,		// default priority
 		256 * 1024, // stack size (256KB is regular default)
-		PSP_THREAD_ATTR_USER, NULL);
+		PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU, NULL);
 
 	if(thid<0)
 	{
