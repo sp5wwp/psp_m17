@@ -26,14 +26,14 @@ then
     if ! test -f codec2/build/src/libcodec2.so
     then
         cd codec2/build
-        cmake .. && make
+        cmake .. && make -j`nproc`
         echo "codec2 built." #TODO: check the real result
     else
         echo "codec2 seems to be built already."
     fi
 else
     mkdir codec2/build && cd codec2/build
-    cmake .. && make
+    cmake .. && make -j`nproc`
     echo "codec2 built." #TODO: check the real result
 fi
 
@@ -45,13 +45,13 @@ then
     #if ! test -f build/psp_m17
     #then
         cd build
-        psp-cmake .. && make
+        psp-cmake .. && make -j`nproc`
         echo "psp_m17 built. All done." #TODO: check the real result
     #else
         #echo "psp_m17 seems to be built already. Exiting."
     #fi
 else
     mkdir build && cd build
-    psp-cmake .. && make
+    psp-cmake .. && make -j`nproc`
     echo "psp_m17 built. All done." #TODO: check the real result
 fi
