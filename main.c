@@ -21,6 +21,7 @@
 #include <pspaudiolib.h>
 #include <pspaudio.h>
 #include <psppower.h>
+#include <psprtc.h>
 // Internet stuff
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,6 +29,9 @@
 #include <m17.h>
 // Codec 2
 #include <codec2.h>
+
+// audio buffer length
+#define FIFO_SAMPLES 8000
 
 #define printf pspDebugScreenPrintf
 #define MODULE_NAME "psp_m17"
@@ -38,14 +42,16 @@ PSP_HEAP_THRESHOLD_SIZE_KB(1024);
 PSP_HEAP_SIZE_KB(-2048);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
-// #define AUDIO_DBG_DUMP	//save decoded audio to files?
 // #define MAX_SPEED		//333MHz CPU?
 
 char exec_path[64]; // absolute path to the executable
 
-// Codec2
+// Codec2 and audio
 struct CODEC2 *c2;
 int16_t audio_buff[2 * 160];
+uint8_t audio_record;
+int16_t fifo[FIFO_SAMPLES];
+volatile uint16_t fifo_head = 0, fifo_tail = 0;
 
 // default data: M17-KCW A
 char ref_addr[16] = "172.234.217.28";
@@ -53,6 +59,11 @@ uint16_t ref_port = 17000;
 char ref_name[8] = "M17-KCW";
 char ref_module = 'A';
 char src_call[12] = "N0CALL H";
+
+// misc
+ScePspDateTime t;
+volatile uint8_t audio_ready = 0;
+volatile uint8_t eot = 0;
 
 // RGB to u32
 uint32_t getColor(uint8_t r, uint8_t g, uint8_t b)
@@ -82,6 +93,34 @@ void printfc(const uint32_t color, const char *fmt, ...)
 	}
 }
 
+/* audio buffering */
+uint16_t fifo_available(void)
+{
+	return (fifo_head - fifo_tail + FIFO_SAMPLES) % FIFO_SAMPLES;
+}
+
+void fifo_push(int16_t *src, uint16_t n)
+{
+	for (uint16_t i = 0; i < n; i++)
+	{
+		fifo[fifo_head] = src[i];
+		fifo_head = (fifo_head + 1) % FIFO_SAMPLES;
+	}
+}
+
+uint16_t fifo_pop(int16_t *dst, uint16_t n)
+{
+	uint16_t i = 0;
+
+	while (i < n && fifo_tail != fifo_head)
+	{
+		dst[i++] = fifo[fifo_tail];
+		fifo_tail = (fifo_tail + 1) % FIFO_SAMPLES;
+	}
+
+	return i;
+}
+
 /* Exit callback */
 int exit_callback(int arg1, int arg2, void *common)
 {
@@ -107,6 +146,59 @@ int CallbackThread(SceSize args, void *argp)
 	return 0;
 }
 
+// called when the audio buffer needs refilling
+void audioCallback(void *buf, unsigned int length, void *userdata)
+{
+	(void)userdata;
+	int16_t *out = (int16_t *)buf;
+
+	// length = frames
+	uint32_t total = length * 2; // TOTAL int16 samples in buffer (L+R)
+
+	static uint32_t phase = 0;
+	static int16_t current = 0;
+
+	const uint32_t IN_RATE = 8000;
+	const uint32_t OUT_RATE = 44100;
+
+    if (!audio_ready)
+	{
+        if (fifo_available() < 4*320)
+		{
+            memset(out, 0, total * sizeof(int16_t));
+            return; // wait for more data
+        }
+
+        audio_ready = 1;
+    }
+
+	for (uint32_t i = 0; i < total; i += 2)
+	{
+		phase += IN_RATE;
+		if (phase >= OUT_RATE)
+		{
+			phase -= OUT_RATE;
+			if (fifo_pop(&current, 1) == 0)
+			{
+				current = 0;
+			}
+		}
+
+		out[i] = current;
+		out[i + 1] = current;
+	}
+
+	if (eot)
+	{
+		if (fifo_available() == 0)
+		{
+			audio_ready = 0;
+			eot = 0;
+			phase = 0;
+		}
+	}
+}
+
 /* Sets up the callback thread and returns its thread id */
 int SetupCallbacks(void)
 {
@@ -120,12 +212,6 @@ int SetupCallbacks(void)
 
 	return thid;
 }
-
-// called when the audio buffer needs refilling
-/*void audioCallback(void *buf, unsigned int length, void *userdata)
-{
-	;
-}*/
 
 int make_socket(uint16_t port)
 {
@@ -186,15 +272,13 @@ void start_client(const char *addr, uint16_t port)
 
 	write(sock, msg, 11);
 
-// test audio dump file
-#ifdef AUDIO_DBG_DUMP
+	// test audio dump file (if enabled)
 	SceUID audio_dump;
-#endif
 
 	while (1)
 	{
 		// prevent the screen from turning black
-		// scePowerTick(PSP_POWER_TICK_DISPLAY);
+		scePowerTick(PSP_POWER_TICK_DISPLAY);
 
 		uint8_t buff[1024] = {0};
 
@@ -232,59 +316,64 @@ void start_client(const char *addr, uint16_t port)
 
 				pspDebugScreenSetXY(0, 13);
 				printfc(getColor(200, 200, 0), "Most recent activity:\n");
-				printfc(getColor(200, 200, 0), "SID: ");
+				sceRtcGetCurrentClockLocalTime(&t);
+				printfc(getColor(200, 200, 0), "Time: ");
+				printf("%02d:%02d:%02d\n", t.hour, t.minute, t.second);
+				printfc(getColor(200, 200, 0), "SID:  ");
 				printf("%04X\n", sid);
-				printfc(getColor(200, 200, 0), "FN:  ");
+				printfc(getColor(200, 200, 0), "FN:   ");
 				printf("%04X\n", fn);
-				printfc(getColor(200, 200, 0), "SRC: ");
+				printfc(getColor(200, 200, 0), "SRC:  ");
 				printf("%-10s\n", d_src);
-				printfc(getColor(200, 200, 0), "DST: ");
+				printfc(getColor(200, 200, 0), "DST:  ");
 				printf("%-10s\n", d_dst);
-				printfc(getColor(200, 200, 0), "PLD: ");
+				printfc(getColor(200, 200, 0), "PLD:  ");
 				for (uint8_t i = 0; i < 16; i++)
 					printf("%02X", pld[i]); // printf("\n");
 
 				if (fn == 0)
 				{
-#ifdef AUDIO_DBG_DUMP
-					char fname[12];
-					sprintf(fname, "/%04X.raw", sid);
-					if (strstr(exec_path, "raw")) // if we previously appended filename
+					if (audio_record)
 					{
-						for (uint8_t i = strlen(exec_path) - 1; i--; i > 0)
+						char fname[12];
+						sprintf(fname, "/%04X.raw", sid);
+						if (strstr(exec_path, "raw")) // if we previously appended filename
 						{
-							if (exec_path[i] == '/')
+							for (uint8_t i = strlen(exec_path) - 1; i > 0; i--)
 							{
-								exec_path[i] = 0;
-								break;
+								if (exec_path[i] == '/')
+								{
+									exec_path[i] = 0;
+									break;
+								}
 							}
 						}
+						audio_dump = sceIoOpen(strcat(exec_path, fname), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
 					}
-					audio_dump = sceIoOpen(strcat(exec_path, fname), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
-#endif
 				}
 
-				// decode audio here
-				codec2_decode(c2, (short*)&audio_buff[0], &pld[0]);
-				codec2_decode(c2, (short*)&audio_buff[160], &pld[8]);
+				// decode audio
+				codec2_decode(c2, (short *)&audio_buff[0], &pld[0]);
+				codec2_decode(c2, (short *)&audio_buff[160], &pld[8]);
+				for (uint16_t i=0; i<320; i++)
+					audio_buff[i] *= 8; // crank up the gain
+				fifo_push(audio_buff, 320);
 
-#ifdef AUDIO_DBG_DUMP
-				if (audio_dump)
+				if (audio_record && audio_dump)
 					sceIoWrite(audio_dump, (uint8_t *)audio_buff, sizeof(audio_buff));
-#endif
 
 				if (fn & 0x8000)
 				{
-					//codec2_destroy(c2);
+					eot = 1;
 
-#ifdef AUDIO_DBG_DUMP
-					if (audio_dump)
+					if (audio_record && audio_dump)
 						sceIoClose(audio_dump);
-#endif
-
-					memset(audio_buff, 0, sizeof(audio_buff));
 				}
 			}
+		}
+		else // no new data
+		{
+			sceKernelDelayThread(5 * 1000); // 5ms delay to reduce CPU use
 		}
 	}
 }
@@ -394,18 +483,19 @@ int main(int argc, char **argv)
 
 	SceUID thid;
 
-// retrieve the path to this executable
-#ifdef AUDIO_DBG_DUMP
-	strcpy(exec_path, argv[0]);
-	for (uint8_t i = strlen(exec_path) - 1; i--; i > 0)
+	// retrieve the path to this executable
+	if (audio_record)
 	{
-		if (exec_path[i] == '/')
+		strcpy(exec_path, argv[0]);
+		for (uint8_t i = strlen(exec_path) - 1; i > 0; i--)
 		{
-			exec_path[i] = 0;
-			break;
+			if (exec_path[i] == '/')
+			{
+				exec_path[i] = 0;
+				break;
+			}
 		}
 	}
-#endif
 
 	SetupCallbacks();
 
@@ -417,8 +507,9 @@ int main(int argc, char **argv)
 
 	c2 = codec2_create(CODEC2_MODE_3200);
 
-	// pspAudioInit();
-	// pspAudioSetChannelCallback(0, audioCallback, NULL);
+	pspAudioInit();
+	pspAudioSetChannelCallback(0, audioCallback, NULL);
+	pspAudioSetVolume(0, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX);
 
 	pspDebugScreenInit();
 	printf("Sony PSP M");
@@ -429,7 +520,7 @@ int main(int argc, char **argv)
 
 	/* Create a user thread to do the real work */
 	thid = sceKernelCreateThread("net_thread", net_thread,
-								 0x11,		 // default priority
+								 0x18,		 // default priority
 								 256 * 1024, // stack size (256KB is regular default)
 								 PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU, NULL);
 
