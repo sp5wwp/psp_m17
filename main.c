@@ -31,7 +31,7 @@
 #include <codec2.h>
 
 // audio buffer length
-#define FIFO_SAMPLES 8000
+#define FIFO_SAMPLES 4000 //0.5s at 8000Hz sample rate
 
 #define printf pspDebugScreenPrintf
 #define MODULE_NAME "psp_m17"
