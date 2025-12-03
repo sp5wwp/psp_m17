@@ -1,7 +1,8 @@
 [submodule "libm17"]
 	path = libm17
 	url = https://github.com/M17-Project/libm17
+	ignore = all
 [submodule "codec2"]
 	path = codec2
 	url = https://github.com/drowe67/codec2
-	ignore = dirty
+	ignore = all

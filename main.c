@@ -67,7 +67,7 @@ void printfc(const uint32_t color, const char *fmt, ...)
 	va_list ap;
 
 	va_start(ap, fmt);
-	vsprintf(str, fmt, ap);
+	vsnprintf(str, sizeof(str), fmt, ap);
 	va_end(ap);
 
 	if (color < 0x1000000U)
@@ -88,6 +88,7 @@ int exit_callback(int arg1, int arg2, void *common)
 	(void)arg1;
 	(void)arg2;
 	(void)common;
+	codec2_destroy(c2);
 	sceKernelExitGame();
 	return 0;
 }
@@ -179,8 +180,8 @@ void start_client(const char *addr, uint16_t port)
 		printfc(getColor(0, 200, 0), "\nConnected to reflector at %s, port %d\n", addr, port);
 	}
 
-	char msg[12] = "CONNxxxxxxx"; //"xxxxxxx" is a placeholder
-	encode_callsign_bytes((uint8_t *)&msg[4], (uint8_t *)src_call);
+	uint8_t msg[11] = "CONN";
+	encode_callsign_bytes(&msg[4], (uint8_t *)src_call);
 	msg[10] = ref_module;
 
 	write(sock, msg, 11);
@@ -192,24 +193,32 @@ void start_client(const char *addr, uint16_t port)
 
 	while (1)
 	{
+		// prevent the screen from turning black
+		// scePowerTick(PSP_POWER_TICK_DISPLAY);
+
 		uint8_t buff[1024] = {0};
 
-		int rd = read(sock, &buff, sizeof(buff));
+		struct sockaddr_in src;
+		socklen_t srclen = sizeof(src);
+		int rd = recvfrom(sock, buff, sizeof(buff), 0, (struct sockaddr *)&src, &srclen);
 
 		if (rd > 0)
 		{
-			// printf("Read: %s\n", buff);
+			/*printf("Read:");
+			for (uint16_t i=0; i<rd; i++)
+				printf(" %02X", buff[i]);
+			printf("\n");*/
 
-			if (strcmp((char*)buff, "PING") == 0) // PING packet from the server
+			if (memcmp(buff, (uint8_t *)"PING", 4) == 0) // PING packet from the server
 			{
 				msg[0] = 'P';
 				msg[1] = 'O';
 				msg[2] = 'N';
 				msg[3] = 'G';
 				write(sock, msg, 10);
-				// printf("-> PONG\n", wb);
+				// printf("PONG\n");
 			}
-			else if (strncmp((char*)buff, "M17 ", 4) == 0) // payload
+			else if (memcmp(buff, (uint8_t *)"M17 ", 4) == 0) // payload
 			{
 				uint8_t *lich = &buff[6];
 				uint8_t *pld = &buff[36];
@@ -221,7 +230,7 @@ void start_client(const char *addr, uint16_t port)
 				decode_callsign_bytes(d_dst, &lich[0]);
 				decode_callsign_bytes(d_src, &lich[6]);
 
-				pspDebugScreenSetXY(0, 11);
+				pspDebugScreenSetXY(0, 13);
 				printfc(getColor(200, 200, 0), "Most recent activity:\n");
 				printfc(getColor(200, 200, 0), "SID: ");
 				printf("%04X\n", sid);
@@ -237,8 +246,6 @@ void start_client(const char *addr, uint16_t port)
 
 				if (fn == 0)
 				{
-					c2 = codec2_create(CODEC2_MODE_3200);
-
 #ifdef AUDIO_DBG_DUMP
 					char fname[12];
 					sprintf(fname, "/%04X.raw", sid);
@@ -258,8 +265,8 @@ void start_client(const char *addr, uint16_t port)
 				}
 
 				// decode audio here
-				codec2_decode(c2, (short *)&audio_buff[0], &pld[0]);
-				codec2_decode(c2, (short *)&audio_buff[160], &pld[8]);
+				codec2_decode(c2, (short*)&audio_buff[0], &pld[0]);
+				codec2_decode(c2, (short*)&audio_buff[160], &pld[8]);
 
 #ifdef AUDIO_DBG_DUMP
 				if (audio_dump)
@@ -268,7 +275,7 @@ void start_client(const char *addr, uint16_t port)
 
 				if (fn & 0x8000)
 				{
-					codec2_destroy(c2);
+					//codec2_destroy(c2);
 
 #ifdef AUDIO_DBG_DUMP
 					if (audio_dump)
@@ -288,12 +295,11 @@ int connect_to_apctl(int config)
 	int err;
 	int stateLast = -1;
 
-	/* Connect using the first profile */
+	// Try to connect using the PSP’s saved WiFi profile (1)
 	err = sceNetApctlConnect(config);
-
 	if (err != 0)
 	{
-		printf(MODULE_NAME ": sceNetApctlConnect returns %08X\n", err);
+		printf(MODULE_NAME ": sceNetApctlConnect returned 0x%08X\n", err);
 		return 0;
 	}
 
@@ -306,54 +312,40 @@ int connect_to_apctl(int config)
 
 		if (err != 0)
 		{
-			printf(MODULE_NAME ": sceNetApctlGetState returns $%x\n", err);
-			break;
+			printf(MODULE_NAME ": sceNetApctlGetState returned 0x%08X\n", err);
+			return 0;
 		}
 
 		if (state > stateLast)
 		{
 			switch (state)
 			{
-			case PSP_NET_APCTL_STATE_DISCONNECTED:; // printf(" disconnected\n");
+			case PSP_NET_APCTL_STATE_DISCONNECTED:
+				printf(" disconnected\n");
 				break;
-
 			case PSP_NET_APCTL_STATE_SCANNING:
 				printf(" scanning\n");
 				break;
-
 			case PSP_NET_APCTL_STATE_JOINING:
 				printf(" joining AP\n");
 				break;
-
 			case PSP_NET_APCTL_STATE_GETTING_IP:
-				printf(" getting IP address\n");
+				printf(" getting IP\n");
 				break;
-
 			case PSP_NET_APCTL_STATE_GOT_IP:
 				printf(" got IP address\n");
 				break;
-
-			default:;
-				break;
 			}
-
 			stateLast = state;
 		}
 
-		if (state == 4)
-			break; // connected with static IP
+		if (state == PSP_NET_APCTL_STATE_GOT_IP) // == 4
+			break;
 
-		// wait a little before polling again
-		sceKernelDelayThread(50 * 1000); // 50ms
+		sceKernelDelayThread(50 * 1000);
 	}
 
 	printf("Connected!\n");
-
-	if (err != 0)
-	{
-		return 0;
-	}
-
 	return 1;
 }
 
@@ -365,22 +357,27 @@ int net_thread(SceSize args, void *argp)
 
 	do
 	{
+		// Allow WiFi hardware to wake up
+		sceKernelDelayThread(1500 * 1000);
+
+		// Initialize networking (required)
 		if ((err = pspSdkInetInit()))
 		{
-			printf(MODULE_NAME ": Error, could not initialise the network %08X\n", err);
+			printf(MODULE_NAME ": could not initialise network 0x%08X\n", err);
 			break;
 		}
 
+		// Now connect using the stored profile (1)
 		if (connect_to_apctl(1))
 		{
-			// connected, get my IPADDR and run test
+			// connected, get IP
 			union SceNetApctlInfo info;
-
 			if (sceNetApctlGetInfo(8, &info) != 0)
 				strcpy(info.ip, "unknown IP");
 
 			start_client(ref_addr, ref_port);
 		}
+
 	} while (0); // what?
 
 	return 0;
@@ -414,6 +411,11 @@ int main(int argc, char **argv)
 
 	sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
 	sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
+	sceUtilityLoadNetModule(PSP_NET_MODULE_PARSEURI);
+	sceUtilityLoadNetModule(PSP_NET_MODULE_PARSEHTTP);
+	sceUtilityLoadNetModule(PSP_NET_MODULE_HTTP);
+
+	c2 = codec2_create(CODEC2_MODE_3200);
 
 	// pspAudioInit();
 	// pspAudioSetChannelCallback(0, audioCallback, NULL);
