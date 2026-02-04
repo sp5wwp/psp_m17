@@ -2,32 +2,18 @@ cmake_minimum_required(VERSION 3.5)
 
 project(psp_m17)
 set(title "PSP M17 Reflector Client")
-set(version "01.10")
+set(version "01.20")
 
 # Collect sources for libm17
-FILE(GLOB libm17_src
+file(GLOB_RECURSE libm17_src CONFIGURE_DEPENDS
     libm17/*.c
-    libm17/decode/*.c
-    libm17/encode/*.c
-    libm17/math/*.c
-    libm17/payload/*.c
-    libm17/phy/*.c
+    libm17/*/*.c
 )
+list(FILTER libm17_src EXCLUDE REGEX "/libm17/unit_tests/")
 
 # Collect sources for codec2
-FILE(GLOB codec2_src
-    codec2/src/codec2.c codec2/src/codec2_fft.c codec2/src/quantise.c
-    codec2/src/filter.c codec2/src/interp.c codec2/src/kiss_fft.c codec2/src/kiss_fftr.c
-    codec2/src/lpc.c codec2/src/lsp.c codec2/src/mbest.c codec2/src/newamp1.c
-    codec2/src/nlp.c codec2/src/pack.c codec2/src/phase.c codec2/src/phi0.c
-    codec2/src/postfilter.c codec2/src/phase.c codec2/src/sine.c
-
-    codec2/build/src/codebook.c
-    codec2/build/src/codebooknewamp1.c
-    codec2/build/src/codebooknewamp1_energy.c
-    codec2/build/src/codebookge.c
-    codec2/build/src/codebookjmv.c
-    codec2/build/src/codebookd.c
+file(GLOB_RECURSE codec2_mod_src CONFIGURE_DEPENDS
+    codec2-mod/src/*.c
 )
 
 # Build libm17 static library
@@ -37,12 +23,12 @@ target_include_directories(libm17 PUBLIC
     ${PROJECT_SOURCE_DIR}/libm17
 )
 
-# Build codec2 static library
-add_library(codec2 STATIC ${codec2_src})
+# Build codec2-mod static library
+add_library(codec2-mod STATIC ${codec2_mod_src})
 
-target_include_directories(codec2 PUBLIC
-    ${PROJECT_SOURCE_DIR}/codec2/build
-    ${PROJECT_SOURCE_DIR}/codec2/src
+target_include_directories(codec2-mod PUBLIC
+    ${PROJECT_SOURCE_DIR}/codec2-mod/src
+    ${PROJECT_SOURCE_DIR}/codec2-mod/inc
 )
 
 # Build PSP application
@@ -57,7 +43,7 @@ target_compile_options(${PROJECT_NAME} PRIVATE
 # Link our libraries and PSP libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
     libm17
-    codec2
+    codec2-mod
     pspdebug
     pspdisplay
     pspge

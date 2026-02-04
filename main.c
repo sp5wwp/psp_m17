@@ -2,7 +2,7 @@
  * main.c - Simple PSP-3000 M17 reflector client.
  *
  * Wojciech Kaczmarski, SP5WWP
- * M17 Foundation, December 2025
+ * M17 Foundation, February 2026
  *
  * Based on a code sample written by:
  * James F <tyranid@gmail.com>
@@ -28,10 +28,12 @@
 // libm17
 #include <m17.h>
 // Codec 2
-#include <codec2.h>
+#include <codec2_mod.h>
 
 // audio buffer length
-#define FIFO_SAMPLES 4000 //0.5s at 8000Hz sample rate
+#define FIFO_PACKET_LEN 30
+#define FIFO_SAMPLES (FIFO_PACKET_LEN * 320)
+#define HALF_AUDIO_FIFO (FIFO_PACKET_LEN * 320 / 2)
 
 #define printf pspDebugScreenPrintf
 #define MODULE_NAME "psp_m17"
@@ -47,9 +49,9 @@ PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 char exec_path[64]; // absolute path to the executable
 
 // Codec2 and audio
-struct CODEC2 *c2;
+codec2_t c2;
 int16_t audio_buff[2 * 160];
-uint8_t audio_record;
+uint8_t audio_record; // audio record - debug (disabled by default)
 int16_t fifo[FIFO_SAMPLES];
 volatile uint16_t fifo_head = 0, fifo_tail = 0;
 
@@ -58,12 +60,12 @@ char ref_addr[16] = "172.234.217.28";
 uint16_t ref_port = 17000;
 char ref_name[8] = "M17-KCW";
 char ref_module = 'A';
-char src_call[12] = "N0CALL H";
+char src_call[10] = "SWL12345";
 
 // misc
 ScePspDateTime t;
-volatile uint8_t audio_ready = 0;
-volatile uint8_t eot = 0;
+volatile uint8_t audio_ready;
+volatile uint8_t eot;
 
 // RGB to u32
 uint32_t getColor(uint8_t r, uint8_t g, uint8_t b)
@@ -94,28 +96,60 @@ void printfc(const uint32_t color, const char *fmt, ...)
 }
 
 /* audio buffering */
-uint16_t fifo_available(void)
+static inline uint16_t fifo_available_nolock(void)
 {
 	return (fifo_head - fifo_tail + FIFO_SAMPLES) % FIFO_SAMPLES;
 }
 
+uint16_t fifo_available(void)
+{
+	uint16_t avail;
+
+	int old = sceKernelCpuSuspendIntr();
+	avail = fifo_available_nolock();
+	sceKernelCpuResumeIntr(old);
+
+	return avail;
+}
+
+static inline uint16_t fifo_space_nolock(void)
+{
+	return FIFO_SAMPLES - fifo_available_nolock() - 1;
+}
+
 void fifo_push(int16_t *src, uint16_t n)
 {
+	int old = sceKernelCpuSuspendIntr();
+	if (fifo_space_nolock() < n)
+	{
+		sceKernelCpuResumeIntr(old);
+		return;
+	}
+
 	for (uint16_t i = 0; i < n; i++)
 	{
 		fifo[fifo_head] = src[i];
 		fifo_head = (fifo_head + 1) % FIFO_SAMPLES;
 	}
+	sceKernelCpuResumeIntr(old);
 }
 
 uint16_t fifo_pop(int16_t *dst, uint16_t n)
 {
 	uint16_t i = 0;
 
-	while (i < n && fifo_tail != fifo_head)
+	while (i < n)
 	{
+		int old = sceKernelCpuSuspendIntr();
+		if (fifo_tail == fifo_head)
+		{
+			sceKernelCpuResumeIntr(old);
+			break;
+		}
+
 		dst[i++] = fifo[fifo_tail];
 		fifo_tail = (fifo_tail + 1) % FIFO_SAMPLES;
+		sceKernelCpuResumeIntr(old);
 	}
 
 	return i;
@@ -127,7 +161,7 @@ int exit_callback(int arg1, int arg2, void *common)
 	(void)arg1;
 	(void)arg2;
 	(void)common;
-	codec2_destroy(c2);
+
 	sceKernelExitGame();
 	return 0;
 }
@@ -161,16 +195,17 @@ void audioCallback(void *buf, unsigned int length, void *userdata)
 	const uint32_t IN_RATE = 8000;
 	const uint32_t OUT_RATE = 44100;
 
-    if (!audio_ready)
+	if (!audio_ready)
 	{
-        if (fifo_available() < 4*320)
+		// check if we have enough audio samples to start playback
+		if (fifo_available() < HALF_AUDIO_FIFO)
 		{
-            memset(out, 0, total * sizeof(int16_t));
-            return; // wait for more data
-        }
+			memset(out, 0, total * sizeof(int16_t));
+			return; // wait for more data
+		}
 
-        audio_ready = 1;
-    }
+		audio_ready = 1;
+	}
 
 	for (uint32_t i = 0; i < total; i += 2)
 	{
@@ -190,12 +225,16 @@ void audioCallback(void *buf, unsigned int length, void *userdata)
 
 	if (eot)
 	{
-		if (fifo_available() == 0)
+		int old = sceKernelCpuSuspendIntr();
+		if (fifo_head == fifo_tail)
 		{
+			codec2_init(&c2);
 			audio_ready = 0;
 			eot = 0;
 			phase = 0;
+			fifo_head = fifo_tail = 0;
 		}
+		sceKernelCpuResumeIntr(old);
 	}
 }
 
@@ -263,11 +302,15 @@ void start_client(const char *addr, uint16_t port)
 	}
 	else
 	{
-		printfc(getColor(0, 200, 0), "\nConnected to reflector at %s, port %d\n", addr, port);
+		srand(time(NULL));
+		uint32_t r = rand() % 100000;
+		sprintf(src_call, "SWL%05ld", r);
+		printfc(getColor(0, 200, 0), "\nConnected to %s %c (%s:%d)\n", ref_name, ref_module, addr, port);
+		printfc(getColor(0, 200, 0), "ID: %s\n", src_call);
 	}
 
-	uint8_t msg[11] = "CONN";
-	encode_callsign_bytes(&msg[4], (uint8_t *)src_call);
+	uint8_t msg[11] = "LSTN";
+	encode_callsign_bytes(&msg[4], (const char *)src_call);
 	msg[10] = ref_module;
 
 	write(sock, msg, 11);
@@ -310,11 +353,11 @@ void start_client(const char *addr, uint16_t port)
 				uint16_t fn = (buff[34] << 8) + buff[35];
 				uint16_t sid = (buff[4] << 8) + buff[5];
 
-				uint8_t d_dst[10], d_src[10];
+				char d_dst[10], d_src[10];
 				decode_callsign_bytes(d_dst, &lich[0]);
 				decode_callsign_bytes(d_src, &lich[6]);
 
-				pspDebugScreenSetXY(0, 13);
+				pspDebugScreenSetXY(0, 14);
 				printfc(getColor(200, 200, 0), "Most recent activity:\n");
 				sceRtcGetCurrentClockLocalTime(&t);
 				printfc(getColor(200, 200, 0), "Time: ");
@@ -353,10 +396,10 @@ void start_client(const char *addr, uint16_t port)
 				}
 
 				// decode audio
-				codec2_decode(c2, (short *)&audio_buff[0], &pld[0]);
-				codec2_decode(c2, (short *)&audio_buff[160], &pld[8]);
-				for (uint16_t i=0; i<320; i++)
-					audio_buff[i] *= 8; // crank up the gain
+				codec2_decode(&c2, &audio_buff[0], &pld[0]);
+				codec2_decode(&c2, &audio_buff[160], &pld[8]);
+				for (uint16_t i = 0; i < 320; i++)
+					audio_buff[i] *= 6; // crank up the gain
 				fifo_push(audio_buff, 320);
 
 				if (audio_record && audio_dump)
@@ -373,7 +416,7 @@ void start_client(const char *addr, uint16_t port)
 		}
 		else // no new data
 		{
-			sceKernelDelayThread(5 * 1000); // 5ms delay to reduce CPU use
+			// sceKernelDelayThread(5 * 1000); // 5ms delay to reduce CPU use
 		}
 	}
 }
@@ -505,7 +548,7 @@ int main(int argc, char **argv)
 	sceUtilityLoadNetModule(PSP_NET_MODULE_PARSEHTTP);
 	sceUtilityLoadNetModule(PSP_NET_MODULE_HTTP);
 
-	c2 = codec2_create(CODEC2_MODE_3200);
+	codec2_init(&c2);
 
 	pspAudioInit();
 	pspAudioSetChannelCallback(0, audioCallback, NULL);
