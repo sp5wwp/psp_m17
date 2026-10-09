@@ -370,7 +370,7 @@ void start_client(const char *addr, uint16_t port)
 	}
 
 	uint8_t msg[11] = "LSTN";
-	encode_callsign_bytes(&msg[4], (const char *)src_call);
+	encode_callsign_bytes(&msg[4], (const uint8_t *)src_call);
 	msg[10] = ref_module;
 
 	write(sock, msg, 11);
@@ -418,8 +418,8 @@ void start_client(const char *addr, uint16_t port)
 				uint16_t sid = (buff[4] << 8) + buff[5];
 
 				char d_dst[10], d_src[10];
-				decode_callsign_bytes(d_dst, &lich[0]);
-				decode_callsign_bytes(d_src, &lich[6]);
+				decode_callsign_bytes((uint8_t *)d_dst, &lich[0]);
+				decode_callsign_bytes((uint8_t *)d_src, &lich[6]);
 
 				pspDebugScreenSetXY(0, 14);
 				printfc(getColor(200, 200, 0), "Most recent activity:\n");
