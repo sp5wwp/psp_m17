@@ -35,6 +35,17 @@
 #define FIFO_SAMPLES (FIFO_PACKET_LEN * 320)
 #define HALF_AUDIO_FIFO (FIFO_PACKET_LEN * 320 / 2)
 
+// resampler: 8 kHz Codec2 output -> 44.1 kHz audio hardware
+#define IN_RATE 8000
+#define OUT_RATE 44100
+#define RS_TAPS 16 // filter length, in input samples
+#define RS_STEP 100 // gcd(IN_RATE, OUT_RATE)
+#define RS_PHASES (OUT_RATE / RS_STEP) // 441 distinct output phases
+#define RS_CUTOFF 3600.0f // Hz, keeps the 4 kHz+ images out
+
+// output gain applied to the decoded speech
+#define AUDIO_GAIN 6
+
 #define printf pspDebugScreenPrintf
 #define MODULE_NAME "psp_m17"
 
@@ -49,7 +60,7 @@ PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 char exec_path[64]; // absolute path to the executable
 
 // Codec2 and audio
-codec2_t c2;
+codec2_decoder_t c2;
 int16_t audio_buff[2 * 160];
 uint8_t audio_record; // audio record - debug (disabled by default)
 int16_t fifo[FIFO_SAMPLES];
@@ -180,59 +191,108 @@ int CallbackThread(SceSize args, void *argp)
 	return 0;
 }
 
+/*
+ * Polyphase windowed-sinc interpolator.
+ * 8000/44100 = 80/441, so the output instant can only fall on 441 distinct
+ * positions between two input samples. One 16-tap filter is precomputed for
+ * each of them (441 x 16 floats = ~28 KB), so no interpolation is needed at runtime.
+ */
+static float rs_coef[RS_PHASES][RS_TAPS];
+
+void rs_init(void)
+{
+	const float fc = RS_CUTOFF / IN_RATE; // cutoff, normalised to the input rate
+
+	for (uint16_t p = 0; p < RS_PHASES; p++)
+	{
+		float frac = (float)p / RS_PHASES; // output position past the newest-but-8 sample
+		float sum = 0.0f;
+
+		for (uint8_t k = 0; k < RS_TAPS; k++)
+		{
+			float t = (float)k - (RS_TAPS / 2 - 1) - frac; // tap distance, in input samples
+			float x = (float)M_PI * 2.0f * fc * t;
+			float s = (fabsf(t) < 1e-6f) ? 1.0f : sinf(x) / x;
+			float n = (t + RS_TAPS / 2.0f) / RS_TAPS; // Blackman window position, 0..1
+			float w = 0.42f - 0.5f * cosf(2.0f * (float)M_PI * n) + 0.08f * cosf(4.0f * (float)M_PI * n);
+
+			rs_coef[p][k] = s * w;
+			sum += rs_coef[p][k];
+		}
+
+		for (uint8_t k = 0; k < RS_TAPS; k++)
+			rs_coef[p][k] /= sum; // unity gain at DC for every phase
+	}
+}
+
 // called when the audio buffer needs refilling
 void audioCallback(void *buf, unsigned int length, void *userdata)
 {
 	(void)userdata;
-	int16_t *out = (int16_t *)buf;
-
-	// length = frames
-	uint32_t total = length * 2; // TOTAL int16 samples in buffer (L+R)
+	int16_t *out = (int16_t *)buf; // length = stereo frames
 
 	static uint32_t phase = 0;
-	static int16_t current = 0;
-
-	const uint32_t IN_RATE = 8000;
-	const uint32_t OUT_RATE = 44100;
+	static float hist[RS_TAPS]; // last 16 input samples, newest at the end
 
 	if (!audio_ready)
 	{
-		// check if we have enough audio samples to start playback
-		if (fifo_available() < HALF_AUDIO_FIFO)
-		{
-			memset(out, 0, total * sizeof(int16_t));
-			return; // wait for more data
-		}
-
-		audio_ready = 1;
+		// start once the prebuffer is full - or immediately if the transmission
+		// has already ended (shorter than the prebuffer)
+		uint16_t avail = fifo_available();
+		if (avail >= HALF_AUDIO_FIFO || (eot && avail > 0))
+			audio_ready = 1;
 	}
 
-	for (uint32_t i = 0; i < total; i += 2)
+	// the resampler runs continuously - when not playing it is fed with zeros,
+	// so the tail of a transmission rings out instead of being cut off
+	uint8_t playing = audio_ready;
+	uint8_t starved = 0;
+
+	for (uint32_t i = 0; i < length; i++)
 	{
 		phase += IN_RATE;
 		if (phase >= OUT_RATE)
 		{
 			phase -= OUT_RATE;
-			if (fifo_pop(&current, 1) == 0)
+
+			int16_t s = 0;
+			if (playing && fifo_pop(&s, 1) == 0)
 			{
-				current = 0;
+				s = 0;
+				playing = 0; // FIFO ran dry - stop pulling for the rest of this buffer
+				starved = 1;
 			}
+
+			memmove(&hist[0], &hist[1], (RS_TAPS - 1) * sizeof(float));
+			hist[RS_TAPS - 1] = s;
 		}
 
-		out[i] = current;
-		out[i + 1] = current;
+		const float *h = rs_coef[phase / RS_STEP];
+		float acc = 0.0f;
+		for (uint8_t k = 0; k < RS_TAPS; k++)
+			acc += hist[k] * h[k];
+
+		int16_t v;
+		if (acc > 32767.0f)
+			v = 32767;
+		else if (acc < -32768.0f)
+			v = -32768;
+		else
+			v = (int16_t)lrintf(acc);
+
+		out[2 * i] = v;
+		out[2 * i + 1] = v;
 	}
 
-	if (eot)
+	if (starved || (!audio_ready && eot))
 	{
+		// FIFO is empty: either the transmission is over, or the network
+		// fell behind - in both cases go back to prebuffering
 		int old = sceKernelCpuSuspendIntr();
 		if (fifo_head == fifo_tail)
 		{
-			codec2_init(&c2);
 			audio_ready = 0;
 			eot = 0;
-			phase = 0;
-			fifo_head = fifo_tail = 0;
 		}
 		sceKernelCpuResumeIntr(old);
 	}
@@ -316,7 +376,11 @@ void start_client(const char *addr, uint16_t port)
 	write(sock, msg, 11);
 
 	// test audio dump file (if enabled)
-	SceUID audio_dump;
+	SceUID audio_dump = 0;
+
+	// stream tracking, used to reset the decoder at the start of each transmission
+	uint16_t last_sid = 0;
+	uint8_t in_stream = 0;
 
 	while (1)
 	{
@@ -395,11 +459,25 @@ void start_client(const char *addr, uint16_t port)
 					}
 				}
 
+				// new transmission? reset the decoder here, in the thread that uses it
+				if (!in_stream || sid != last_sid || (fn & 0x7FFF) == 0)
+					codec2_decoder_init(&c2);
+				last_sid = sid;
+				in_stream = !(fn & 0x8000);
+
 				// decode audio
 				codec2_decode(&c2, &audio_buff[0], &pld[0]);
 				codec2_decode(&c2, &audio_buff[160], &pld[8]);
 				for (uint16_t i = 0; i < 320; i++)
-					audio_buff[i] *= 6; // crank up the gain
+				{
+					// crank up the gain, saturating instead of wrapping around
+					int32_t v = (int32_t)audio_buff[i] * AUDIO_GAIN;
+					if (v > 32767)
+						v = 32767;
+					else if (v < -32768)
+						v = -32768;
+					audio_buff[i] = (int16_t)v;
+				}
 				fifo_push(audio_buff, 320);
 
 				if (audio_record && audio_dump)
@@ -548,7 +626,8 @@ int main(int argc, char **argv)
 	sceUtilityLoadNetModule(PSP_NET_MODULE_PARSEHTTP);
 	sceUtilityLoadNetModule(PSP_NET_MODULE_HTTP);
 
-	codec2_init(&c2);
+	codec2_decoder_init(&c2);
+	rs_init(); // before the audio callback starts running
 
 	pspAudioInit();
 	pspAudioSetChannelCallback(0, audioCallback, NULL);
